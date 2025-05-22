@@ -1,5 +1,5 @@
 name: Windows RDP via Ngrok
-on: [push, workflow_dispatch]
+on: [workflow_dispatch]
 
 jobs:
   rdp-access:
@@ -19,16 +19,42 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Restart-Service -Name "TermService" -Force
 
-      - name: Set Secure Password (via GitHub Secrets)
+      - name: Create or Update RDP User
         run: |
-          $password = ConvertTo-SecureString "${{ secrets.RDP_PASSWORD }}" -AsPlainText -Force
-          Set-LocalUser -Name "runneradmin" -Password $password -ErrorAction Stop
+          $Password = ConvertTo-SecureString "${{ secrets.RDP_PASSWORD }}" -AsPlainText -Force
+          if (-not (Get-LocalUser -Name "runneradmin" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "runneradmin" -Password $Password -AccountNeverExpires
+          } else {
+            Set-LocalUser -Name "runneradmin" -Password $Password
+          }
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin"
 
       - name: Start Ngrok Tunnel (RDP on 3389)
         run: Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -NoNewWindow
 
-      - name: Get Ngrok Public URL
+      - name: Wait for Ngrok to initialize (15 seconds)
+        run: Start-Sleep -Seconds 15
+
+      - name: Get Ngrok Public URL (with retry logic)
         run: |
-          Start-Sleep -Seconds 5  # Wait for Ngrok to initialize
-          (Invoke-WebRequest -Uri http://localhost:4040/api/tunnels -UseBasicParsing).Content | Out-File ngrok_url.txt
-          Get-Content ngrok_url.txt
+          $retryCount = 0
+          $maxRetries = 5
+          $success = $false
+
+          while ($retryCount -lt $maxRetries -and -not $success) {
+              try {
+                  $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -ErrorAction Stop
+                  $response.Content | Out-File ngrok_url.txt
+                  Get-Content ngrok_url.txt
+                  $success = $true
+              } catch {
+                  $retryCount++
+                  Write-Host "Attempt $retryCount failed. Retrying in 5 seconds..."
+                  Start-Sleep -Seconds 5
+              }
+          }
+
+          if (-not $success) {
+              Write-Host "Failed to get Ngrok URL after $maxRetries attempts."
+              exit 1
+          }
